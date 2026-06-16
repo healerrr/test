@@ -1,0 +1,7 @@
+interface:
+  display_name: "Monthly DingTalk Expense Summary"
+  short_description: "Generate monthly DingTalk expense approval summaries"
+  default_prompt: "Use $monthly-dingtalk-expense-summary to generate a monthly DingTalk expense approval summary workbook."
+
+dependencies:
+  tools: []

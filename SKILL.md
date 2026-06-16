@@ -1,0 +1,194 @@
+---
+name: monthly-dingtalk-expense-summary
+description: Generate reusable monthly DingTalk OA expense approval reports from the 通用费用报销（人民币） process. Use when the user asks to fetch monthly DingTalk approval details, build completed/agreed expense approval detail workbooks, produce department-by-expense-type summaries, or run the automated monthly workflow with DingTalk notification.
+---
+
+# Monthly DingTalk Expense Summary
+
+## Overview
+
+This skill automates the monthly DingTalk expense workflow:
+
+1. Fetch full OA approval details for `通用费用报销（人民币）` via Python script.
+2. Save the raw details JSON.
+3. Build an approved-detail workbook with the 11 required columns.
+4. Build a department x expense-type summary workbook using the bundled template layout.
+5. Upload the summary and detail Excel files and send them to recipients via DingTalk robot OTT messages.
+
+## Bundled Resources
+
+- **`scripts/run_monthly.py`** — Unified entry point for automation (OpenClaw / 小龙虾). Auto-detects previous month, fetches data, builds reports, and sends DingTalk notifications.
+- **`scripts/fetch_approval_data.py`** — Standalone CLI script for fetching DingTalk approval data.
+- **`scripts/build_report.py`** — Deterministic report builder.
+- **`assets/default_expense_summary_template.xlsx`** — Default Excel layout template.
+
+## Prerequisites
+
+The `requests` and `openpyxl` Python packages must be available. Install into the managed venv if missing:
+
+```powershell
+&C:\Users\Thinkpad User\.workbuddy\binaries\python\envs\default\Scripts\pip.exe install requests openpyxl
+```
+
+DingTalk credentials are hard-coded as defaults in the scripts (no need to set environment variables). Environment variables can still override the hard-coded values if needed:
+
+```text
+DINGTALK_APP_KEY      - overrides built-in default
+DINGTALK_APP_SECRET   - overrides built-in default
+DINGTALK_USER_ID      - overrides built-in default
+DINGTALK_ACCESS_TOKEN - If set, skip app_key/app_secret token exchange entirely
+```
+
+## Quick Start (for OpenClaw / 小龙虾)
+
+### One-command automation
+
+```powershell
+python "C:\Users\Thinkpad User\.workbuddy\skills\monthly-dingtalk-expense-summary\scripts\run_monthly.py" --auto --output-dir "C:\Users\Thinkpad User\WorkBuddy\expense_reports"
+```
+
+This single command:
+
+1. **Auto-detects previous month** (e.g., running in June → processes May)
+2. **Fetches** all approval instances with details from DingTalk OpenAPI
+3. **Builds** the summary and detail Excel workbooks
+4. **Sends** both Excel files + a markdown summary notification to the default recipients via DingTalk
+
+### OpenClaw scheduling
+
+Configure OpenClaw to trigger this command once per month (e.g., on the 1st of each month at 09:00). The `--auto` flag ensures it always processes the previous month's data automatically.
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success — reports built and notifications sent |
+| 1 | Partial success — reports built but notification failed |
+| 2 | Fatal failure — data fetch or report build failed |
+
+### Default recipients
+
+The reports are sent to the following DingTalk users via robot OTT file messages:
+
+| Name | User ID |
+|------|---------|
+| 金春玲 | `16248445393404993` |
+| 丁红姣 | `16208048923325185` |
+
+To override recipients, use `--recipients`:
+
+```powershell
+python run_monthly.py --auto --recipients "张三" "李四"
+```
+
+To skip the notification step (only fetch and build):
+
+```powershell
+python run_monthly.py --auto --skip-notify
+```
+
+### User ID lookup
+
+To look up a DingTalk user ID by name:
+
+```powershell
+python run_monthly.py --lookup-user "金春玲"
+```
+
+## Manual Usage (Step by Step)
+
+### 1. Fetch details
+
+```powershell
+python "C:\Users\Thinkpad User\.workbuddy\skills\monthly-dingtalk-expense-summary\scripts\fetch_approval_data.py" `
+  --year 2026 --month 6 `
+  --include-details `
+  --output-dir "." `
+  --max-instances 20000
+```
+
+The script outputs a JSON file named by default:
+
+```text
+YYYY_MM_general_expense_new_template_details.json
+```
+
+Process code defaults to `PROC-402A087A-F4A1-4B4D-9726-29BA08FD773D` (通用费用报销（人民币）新版). Override with `--process-code` if needed.
+
+### 2. Build report workbooks
+
+```powershell
+python "C:\Users\Thinkpad User\.workbuddy\skills\monthly-dingtalk-expense-summary\scripts\build_report.py" `
+  --details-json ".\2026_06_general_expense_new_template_details.json" `
+  --year 2026 --month 6 --output-dir "."
+```
+
+Outputs:
+
+- `<YYYY_MM>_审批明细表.xlsx`
+- `<YYYY_MM>_费用汇总表.xlsx`
+- `<YYYY_MM>_审批明细表.json`
+- `<YYYY_MM>_审批明细表.csv`
+
+Default metric is 含税金额, sourced from `付款合计金额`. Use `--metric pre-tax` only when the user explicitly wants 不含税金额.
+
+### 3. Verify before replying
+
+After script execution, report:
+
+- number of raw details
+- number of `已完成/同意` records
+- final summary workbook path
+- grand total from the workbook
+
+Do not overwrite the raw DingTalk JSON unless the user asks.
+
+## DingTalk Notification Details
+
+The notification step uses:
+
+1. **File upload**: `POST /media/upload` → gets `media_id`
+2. **Robot OTT file message**: `POST /v1.0/robot/oToMessages/batchSend` with `msgKey=sampleFile`
+3. **Markdown summary**: `POST /v1.0/robot/oToMessages/batchSend` with `msgKey=sampleMarkdown`
+
+The `robotCode` used is the app's `app_key` (`dingtyzldpxnwvoonzxm`). The app must have robot OTT message permissions enabled.
+
+## Field Rules
+
+The approved-detail workbook columns are:
+
+```text
+序号, 审批单号, 发起日期, 发起人, 费用所属企业, 费用所属部门, 费用类型, 不含税金额, 付款合计金额, 费用事由, 审批状态
+```
+
+Mapping:
+
+- `审批单号`: `process_instance.business_id`
+- `发起日期`: `process_instance.create_time`
+- `发起人`: parse `process_instance.title` as `(.+?)提交的`; fallback to start operation userid
+- `费用所属企业`: form field `费用所属企业`
+- `费用所属部门`: form field `费用所属部门`
+- `费用类型`: form field `费用类型`
+- `不含税金额`: form field `不含税金额（普票填含税）`
+- `付款合计金额`: form field `费用付款合计金额`
+- `费用事由`: form field `费用事由`
+- `审批状态`: combine DingTalk status/result, e.g. `COMPLETED + agree` => `已完成/同意`
+
+Filter detail rows to:
+
+```text
+审批状态 == 已完成/同意
+```
+
+## Template Layout
+
+By default, copy the bundled template workbook's first sheet and preserve:
+
+- title merge and formatting
+- column widths and row heights
+- header, total-row, total-column styles
+- department order and expense-type order
+
+Replace title text from `不含税金额` to `含税金额` when using `--metric tax-included`.
+
+If a later month contains a new department or expense type, append it before the total row/column and copy nearby styles.
