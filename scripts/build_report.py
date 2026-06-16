@@ -24,6 +24,7 @@ DETAIL_HEADERS = [
     "审批单号",
     "发起日期",
     "发起人",
+    "审批流程",
     "费用所属企业",
     "费用所属部门",
     "费用类型",
@@ -32,6 +33,25 @@ DETAIL_HEADERS = [
     "费用事由",
     "审批状态",
 ]
+
+# Field mapping: each process type has different form field names.
+# Maps canonical column name -> list of actual field names per process type.
+# Index: 0=通用费用报销, 1=差旅费用报销, 2=经办付款人民币, 3=经办付款外币
+FIELD_MAPPINGS = {
+    "费用所属企业": ["费用所属企业", "费用所属企业", "付款所属企业", "(Remmit from)付款所属企业"],
+    "费用所属部门": ["费用所属部门", "资金预算和费用所属部门", "资金预算(和费用)所属部门", "(Department)资金预算(和费用)所属部门"],
+    "不含税金额": ["不含税金额（普票填含税）", "不含税金额（普票填含税）", None, None],
+    "付款合计金额": ["费用付款合计金额", "合计金额", "付款合计金额", "(Total amount)付款合计金额"],
+    "费用类型": ["费用类型", "科目", "付款类型", "(Payment type)付款类型"],
+    "费用事由": ["费用事由", "备注", "付款明细", "(Remarks)备注"],
+}
+
+PROCESS_TYPE_INDEX = {
+    "通用费用报销": 0,
+    "差旅费用报销": 1,
+    "经办付款人民币": 2,
+    "经办付款外币": 3,
+}
 
 
 def clean(value):
@@ -77,6 +97,46 @@ def form_fields(process_instance):
     return fields
 
 
+def detect_process_type(process_instance: dict) -> str:
+    """Detect which process type this instance belongs to based on its form fields."""
+    fields = {item.get("name", "") for item in process_instance.get("form_component_values", [])}
+
+    # 经办付款(外币版) has unique English+Chinese field names
+    if "(Remmit from)付款所属企业" in fields or "(Payment type)付款类型" in fields:
+        return "经办付款外币"
+
+    # 经办付款(人民币版) has 付款类型 and 付款明细
+    if "付款类型" in fields and "付款明细" in fields:
+        return "经办付款人民币"
+
+    # 差旅费用报销 has 科目 and 合计金额 (not 费用类型)
+    if "科目" in fields and "合计金额" in fields:
+        return "差旅费用报销"
+
+    # Default: 通用费用报销
+    return "通用费用报销"
+
+
+def mapped_field_value(fields: dict, canonical_name: str, process_type: str) -> str:
+    """Get the value of a canonical field for a given process type."""
+    mapping = FIELD_MAPPINGS.get(canonical_name)
+    if not mapping:
+        return ""
+    idx = PROCESS_TYPE_INDEX.get(process_type, 0)
+    field_name = mapping[idx]
+    if field_name is None:
+        return ""
+    return fields.get(field_name, "")
+
+
+PROCESS_TYPE_LABELS = {
+    "通用费用报销": "通用费用报销",
+    "差旅费用报销": "差旅费用报销",
+    "经办付款人民币": "经办付款(人民币)",
+    "经办付款外币": "经办付款(外币)",
+}
+
+
 def originator_name(process_instance):
     title = clean(process_instance.get("title"))
     if isinstance(title, str):
@@ -111,31 +171,44 @@ def approval_status(process_instance):
 
 
 def load_process_instances(details_json):
-    data = json.loads(Path(details_json).read_text(encoding="utf-8"))
-    instances = []
-    for item in data.get("details", []):
-        process_instance = item.get("process_instance", item)
-        if process_instance:
-            instances.append(process_instance)
-    instances.sort(key=lambda item: item.get("create_time") or 0)
-    return data, instances
+    """Load process instances from a single JSON file or a list of JSON files (comma-separated)."""
+    all_instances = []
+    all_data = None
+
+    for path_str in details_json.split(","):
+        path_str = path_str.strip()
+        data = json.loads(Path(path_str).read_text(encoding="utf-8"))
+        if all_data is None:
+            all_data = data
+        instances = []
+        for item in data.get("details", []):
+            process_instance = item.get("process_instance", item)
+            if process_instance:
+                instances.append(process_instance)
+        all_instances.extend(instances)
+
+    all_instances.sort(key=lambda item: item.get("create_time") or 0)
+    return all_data, all_instances
 
 
 def build_detail_rows(instances):
     rows = []
     for process_instance in instances:
         fields = form_fields(process_instance)
+        process_type = detect_process_type(process_instance)
+
         rows.append(
             {
                 "审批单号": clean(process_instance.get("business_id")),
                 "发起日期": to_datetime(process_instance.get("create_time")),
                 "发起人": originator_name(process_instance),
-                "费用所属企业": clean(fields.get("费用所属企业")),
-                "费用所属部门": clean(fields.get("费用所属部门")),
-                "费用类型": clean(fields.get("费用类型")),
-                "不含税金额": to_number(fields.get("不含税金额（普票填含税）")),
-                "付款合计金额": to_number(fields.get("费用付款合计金额")),
-                "费用事由": clean(fields.get("费用事由")),
+                "审批流程": PROCESS_TYPE_LABELS.get(process_type, process_type),
+                "费用所属企业": clean(mapped_field_value(fields, "费用所属企业", process_type)),
+                "费用所属部门": clean(mapped_field_value(fields, "费用所属部门", process_type)),
+                "费用类型": clean(mapped_field_value(fields, "费用类型", process_type)),
+                "不含税金额": to_number(mapped_field_value(fields, "不含税金额", process_type)),
+                "付款合计金额": to_number(mapped_field_value(fields, "付款合计金额", process_type)),
+                "费用事由": clean(mapped_field_value(fields, "费用事由", process_type)),
                 "审批状态": approval_status(process_instance),
             }
         )
@@ -365,7 +438,11 @@ def write_plain_summary(rows, output_path, year, month, metric):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Build monthly DingTalk expense approval summary workbooks.")
-    parser.add_argument("--details-json", required=True, help="Full DingTalk approval details JSON.")
+    parser.add_argument(
+        "--details-json",
+        required=True,
+        help="Full DingTalk approval details JSON. Multiple files can be comma-separated.",
+    )
     parser.add_argument("--year", type=int, required=True)
     parser.add_argument("--month", type=int, required=True)
     parser.add_argument(

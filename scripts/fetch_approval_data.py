@@ -41,6 +41,14 @@ DEFAULT_APP_KEY = "dingtyzldpxnwvoonzxm"
 DEFAULT_APP_SECRET = "L10kCqqStjF8MmMDZCPYbP6LtzHfgU_oEBtGdftwzJaxRtDpvAicQr7m-ScVzA3C"
 DEFAULT_USER_ID = "16248445393404993"
 
+# All supported approval process codes
+PROCESS_CODES = {
+    "通用费用报销（人民币）": "PROC-402A087A-F4A1-4B4D-9726-29BA08FD773D",
+    "差旅费用报销(人民币版)": "PROC-4E9EF26C-F477-4641-A103-CDC573812CC7",
+    "经办付款申请单（人民币版）": "PROC-3JYJ9N2V-6AYV91D7SRD9DSUF6QLW1-504EJ9IJ-1",
+    "经办付款申请单（外币版）": "PROC-RIYJS65W-8CSWSZ9SSFAXV8GGN8BY1-5FMPCIJJ-91",
+}
+
 _TOKEN_CACHE: dict = {"access_token": None, "expires_at": 0}
 
 
@@ -190,6 +198,10 @@ def parse_args():
         default="PROC-402A087A-F4A1-4B4D-9726-29BA08FD773D",
         help="DingTalk approval process code. Default: 通用费用报销（人民币） new template.",
     )
+    parser.add_argument(
+        "--process-name",
+        help="Process name key from PROCESS_CODES dict. Alternative to --process-code.",
+    )
     parser.add_argument("--year", type=int, required=True, help="Target year (e.g. 2026).")
     parser.add_argument("--month", type=int, required=True, help="Target month (1-12).")
     parser.add_argument(
@@ -213,6 +225,11 @@ def parse_args():
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
     args = parse_args()
     include_details = args.include_details and not args.no_details
 
@@ -242,6 +259,15 @@ def main():
 
     output_name = args.output_name or f"{args.year}_{args.month:02d}_general_expense_new_template_details.json"
     output_path = output_dir / output_name
+
+    # Resolve process_code from --process-name if given
+    process_code = args.process_code
+    if args.process_name:
+        if args.process_name in PROCESS_CODES:
+            process_code = PROCESS_CODES[args.process_name]
+        else:
+            print(f"ERROR: Unknown process name '{args.process_name}'. Available: {list(PROCESS_CODES.keys())}")
+            sys.exit(2)
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)

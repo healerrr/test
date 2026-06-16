@@ -4,6 +4,12 @@ Designed for automation platforms (e.g., OpenClaw / 小龙虾).
 Automatically processes the previous month's data, builds reports,
 and sends the summary Excel file to designated recipients via DingTalk.
 
+Supports 4 approval processes:
+  - 通用费用报销（人民币）
+  - 差旅费用报销(人民币版)
+  - 经办付款申请单（人民币版）
+  - 经办付款申请单（外币版）
+
 Usage:
     # Auto mode (previous month, for OpenClaw scheduling):
     python run_monthly.py --auto
@@ -51,8 +57,13 @@ DEFAULT_RECIPIENTS = {
     "丁红姣": "16208048923325185",
 }
 
-# Default process code for 通用费用报销（人民币）新版
-DEFAULT_PROCESS_CODE = "PROC-402A087A-F4A1-4B4D-9726-29BA08FD773D"
+# All supported approval process codes
+PROCESS_CODES = {
+    "通用费用报销（人民币）": "PROC-402A087A-F4A1-4B4D-9726-29BA08FD773D",
+    "差旅费用报销(人民币版)": "PROC-4E9EF26C-F477-4641-A103-CDC573812CC7",
+    "经办付款申请单（人民币版）": "PROC-3JYJ9N2V-6AYV91D7SRD9DSUF6QLW1-504EJ9IJ-1",
+    "经办付款申请单（外币版）": "PROC-RIYJS65W-8CSWSZ9SSFAXV8GGN8BY1-5FMPCIJJ-91",
+}
 
 # Script paths (relative to skill directory)
 SKILL_DIR = Path(__file__).resolve().parent
@@ -190,19 +201,11 @@ def send_markdown_message(recipient_ids: list[str], title: str, text: str, robot
 # ─── User Lookup ──────────────────────────────────────────────────────────────────
 
 def lookup_user_by_name(name: str) -> str | None:
-    """Look up a DingTalk user ID by name.
-
-    Since the app may not have通讯录 permissions, this function tries:
-    1. Check hard-coded DEFAULT_RECIPIENTS
-    2. Search through recent approval data (if available)
-    3. Traverse the org structure via API (if permissions allow)
-    """
-    # 1. Check hard-coded defaults
+    """Look up a DingTalk user ID by name."""
     if name in DEFAULT_RECIPIENTS:
         print(f"  Found '{name}' in default recipients: {DEFAULT_RECIPIENTS[name]}")
         return DEFAULT_RECIPIENTS[name]
 
-    # 2. Try DingTalk API user search
     try:
         result = _oapi_request("POST", f"{OAPI_BASE}/topapi/v2/user/list", {
             "dept_id": 1, "cursor": 0, "size": 100,
@@ -213,7 +216,7 @@ def lookup_user_by_name(name: str) -> str | None:
                 print(f"  Found '{name}' via API: {userid}")
                 return userid
     except RuntimeError:
-        pass  # Permission denied, skip
+        pass
 
     print(f"  WARNING: Could not find user ID for '{name}'")
     return None
@@ -231,14 +234,16 @@ def previous_month() -> tuple[int, int]:
 
 # ─── Main Workflow ────────────────────────────────────────────────────────────────
 
-def run_fetch(year: int, month: int, output_dir: Path) -> Path:
-    """Step 1: Fetch DingTalk approval data."""
+def run_fetch(year: int, month: int, proc_name: str, proc_code: str, output_dir: Path) -> Path:
+    """Step 1: Fetch DingTalk approval data for a single process type."""
     python = sys.executable
-    output_name = f"{year}_{month:02d}_general_expense_new_template_details.json"
+    safe_key = proc_code.replace("-", "_").replace("PROC_", "").lower()
+    output_name = f"{year}_{month:02d}_{safe_key}_details.json"
     output_path = output_dir / output_name
 
     cmd = [
         python, str(FETCH_SCRIPT),
+        "--process-code", proc_code,
         "--year", str(year),
         "--month", str(month),
         "--include-details",
@@ -247,99 +252,94 @@ def run_fetch(year: int, month: int, output_dir: Path) -> Path:
         "--output-name", output_name,
     ]
 
-    print(f"[Step 1] Fetching approval data for {year}-{month:02d} ...")
+    print(f"\n[Step 1] Fetching {proc_name} for {year}-{month:02d} ...")
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
-        print(f"  FAILED: {result.stderr}")
-        raise RuntimeError(f"fetch_approval_data.py failed with exit code {result.returncode}")
+        print(f"  WARNING: Fetch failed for {proc_name}: {result.stderr}")
+        raise RuntimeError(f"Fetch failed for {proc_name}")
     print(result.stdout.rstrip())
 
     if not output_path.exists():
-        raise RuntimeError(f"Expected output file not found: {output_path}")
+        raise RuntimeError(f"Output file not found: {output_path}")
 
     return output_path
 
 
-def run_build(year: int, month: int, details_json: Path, output_dir: Path) -> dict:
-    """Step 2: Build report workbooks."""
+def run_build(year: int, month: int, proc_label: str, details_json: Path, output_dir: Path) -> dict:
+    """Step 2: Build report workbooks for a single process type."""
     python = sys.executable
+    prefix = f"{year}_{month:02d}_{proc_label}"
 
     cmd = [
         python, str(BUILD_SCRIPT),
         "--details-json", str(details_json),
         "--year", str(year),
         "--month", str(month),
+        "--prefix", prefix,
         "--output-dir", str(output_dir),
     ]
 
-    print(f"\n[Step 2] Building report workbooks ...")
+    print(f"\n[Step 2] Building report for {proc_label} ...")
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         print(f"  FAILED: {result.stderr}")
-        raise RuntimeError(f"build_report.py failed with exit code {result.returncode}")
+        raise RuntimeError(f"build_report.py failed for {proc_label}")
 
-    # Parse the JSON output from build_report.py
     build_result = json.loads(result.stdout.strip())
     print(f"  Raw details: {build_result['raw_details']}")
     print(f"  Approved rows: {build_result['approved_rows']}")
     print(f"  Grand total: ¥{build_result['grand_total']:,.2f}")
-    print(f"  Summary workbook: {build_result['summary_xlsx']}")
+    print(f"  Summary: {Path(build_result['summary_xlsx']).name}")
+    print(f"  Detail: {Path(build_result['detail_xlsx']).name}")
 
     return build_result
 
 
-def run_notify(build_result: dict, year: int, month: int, recipient_ids: list[str]) -> bool:
-    """Step 3: Upload and send the summary file via DingTalk."""
-    summary_path = Path(build_result["summary_xlsx"])
-    detail_path = Path(build_result["detail_xlsx"])
-
-    if not summary_path.exists():
-        print(f"  WARNING: Summary file not found: {summary_path}")
-        return False
-
+def run_notify(all_build_results: list[dict], year: int, month: int, recipient_ids: list[str]) -> bool:
+    """Step 3: Upload and send all report files via DingTalk."""
     print(f"\n[Step 3] Sending reports via DingTalk ...")
     print(f"  Recipients: {recipient_ids}")
 
     success = True
 
-    # Send summary Excel
+    # Collect all xlsx files from all process types
+    files_to_send = []
+    for br in all_build_results:
+        for key in ("summary_xlsx", "detail_xlsx"):
+            fpath = Path(br.get(key, ""))
+            if fpath.exists():
+                files_to_send.append(fpath)
+
+    # Send each xlsx file
+    for fpath in files_to_send:
+        try:
+            media_id = upload_file(fpath)
+            send_file_message(recipient_ids, media_id, fpath.name)
+            print(f"  Sent: {fpath.name}")
+        except Exception as e:
+            print(f"  ERROR sending {fpath.name}: {e}")
+            success = False
+
+    # Send combined markdown summary
     try:
-        media_id = upload_file(summary_path)
-        send_file_message(recipient_ids, media_id, summary_path.name)
-        print(f"  Sent: {summary_path.name}")
-    except Exception as e:
-        print(f"  ERROR sending summary file: {e}")
-        success = False
+        grand_total = sum(br.get("grand_total", 0) for br in all_build_results)
+        total_raw = sum(br.get("raw_details", 0) for br in all_build_results)
+        total_approved = sum(br.get("approved_rows", 0) for br in all_build_results)
 
-    # Send detail Excel
-    try:
-        if detail_path.exists():
-            media_id = upload_file(detail_path)
-            send_file_message(recipient_ids, media_id, detail_path.name)
-            print(f"  Sent: {detail_path.name}")
-    except Exception as e:
-        print(f"  ERROR sending detail file: {e}")
-        # Non-fatal, detail file is secondary
+        lines = [f"## {year}年{month:02d}月费用审批汇总\n"]
+        for br in all_build_results:
+            prefix = Path(br.get("summary_xlsx", "")).stem
+            # Extract process label from prefix: "2026_04_XXX_费用汇总表" → "XXX"
+            parts = prefix.rsplit("_费用汇总表", 1)[0] if "_费用汇总表" in prefix else prefix
+            lines.append(f"### {parts}")
+            lines.append(f"- 审批条数: {br['raw_details']}")
+            lines.append(f"- 已完成/同意: {br['approved_rows']}")
+            lines.append(f"- 含税金额: ¥{br['grand_total']:,.2f}\n")
 
-    # Send markdown summary notification
-    try:
-        grand_total = build_result.get("grand_total", 0)
-        approved_rows = build_result.get("approved_rows", 0)
-        raw_details = build_result.get("raw_details", 0)
-        dept_count = build_result.get("department_count", 0)
-        type_count = build_result.get("expense_type_count", 0)
+        lines.append(f"**总计**: {total_raw} 条审批, {total_approved} 条已同意, 合计 ¥{grand_total:,.2f}")
+        lines.append("\n各流程的费用汇总表和审批明细表已通过文件消息发送，请查收。")
 
-        md_text = (
-            f"## {year}年{month:02d}月费用审批汇总\n\n"
-            f"- **审批总条数**: {raw_details}\n"
-            f"- **已完成/同意**: {approved_rows}\n"
-            f"- **部门数**: {dept_count}\n"
-            f"- **费用类型数**: {type_count}\n"
-            f"- **含税金额合计**: ¥{grand_total:,.2f}\n\n"
-            f"费用汇总表和审批明细表已通过文件消息发送，请查收。"
-        )
-
-        send_markdown_message(recipient_ids, f"{year}年{month:02d}月费用审批汇总", md_text)
+        send_markdown_message(recipient_ids, f"{year}年{month:02d}月费用审批汇总", "\n".join(lines))
         print(f"  Sent: markdown summary notification")
     except Exception as e:
         print(f"  ERROR sending markdown notification: {e}")
@@ -378,6 +378,11 @@ def main():
         action="store_true",
         help="Skip DingTalk notification step (only fetch and build).",
     )
+    parser.add_argument(
+        "--processes",
+        nargs="*",
+        help="Override which processes to fetch. Names from PROCESS_CODES keys. Default: all 4 processes.",
+    )
 
     args = parser.parse_args()
 
@@ -404,6 +409,20 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Filter processes if --processes specified ──
+    active_processes = dict(PROCESS_CODES)
+    if args.processes:
+        selected = {}
+        for name in args.processes:
+            if name in PROCESS_CODES:
+                selected[name] = PROCESS_CODES[name]
+            else:
+                print(f"  WARNING: Unknown process '{name}'. Available: {list(PROCESS_CODES.keys())}")
+        if selected:
+            active_processes = selected
+
+    print(f"Processes to fetch: {list(active_processes.keys())}")
+
     # ── Resolve recipient IDs ──
     recipient_names = args.recipients or list(DEFAULT_RECIPIENTS.keys())
     recipient_ids = []
@@ -418,18 +437,32 @@ def main():
         print("ERROR: No valid recipients found and --skip-notify not set")
         sys.exit(2)
 
-    # ── Step 1: Fetch data ──
-    try:
-        details_json = run_fetch(year, month, output_dir)
-    except Exception as e:
-        print(f"FATAL: Data fetch failed: {e}")
-        sys.exit(2)
+    # ── Step 1+2: Fetch & build per process ──
+    # Process label mapping for file naming
+    PROCESS_LABELS = {
+        "通用费用报销（人民币）": "通用费用报销",
+        "差旅费用报销(人民币版)": "差旅费用报销",
+        "经办付款申请单（人民币版）": "经办付款人民币",
+        "经办付款申请单（外币版）": "经办付款外币",
+    }
 
-    # ── Step 2: Build reports ──
-    try:
-        build_result = run_build(year, month, details_json, output_dir)
-    except Exception as e:
-        print(f"FATAL: Report build failed: {e}")
+    all_build_results = []
+    for proc_name, proc_code in active_processes.items():
+        label = PROCESS_LABELS.get(proc_name, proc_name)
+        try:
+            # Step 1: Fetch
+            details_json = run_fetch(year, month, proc_name, proc_code, output_dir)
+            # Step 2: Build report
+            build_result = run_build(year, month, label, details_json, output_dir)
+            build_result["process_name"] = proc_name
+            build_result["process_label"] = label
+            all_build_results.append(build_result)
+        except Exception as e:
+            print(f"  WARNING: {proc_name} pipeline failed: {e}")
+            continue
+
+    if not all_build_results:
+        print("FATAL: All process pipelines failed")
         sys.exit(2)
 
     # ── Step 3: Send notifications ──
@@ -438,16 +471,19 @@ def main():
         print(f"\nDone. Reports saved to: {output_dir}")
         sys.exit(0)
 
-    notify_ok = run_notify(build_result, year, month, recipient_ids)
+    notify_ok = run_notify(all_build_results, year, month, recipient_ids)
 
     # ── Final summary ──
+    grand_total = sum(br.get("grand_total", 0) for br in all_build_results)
+    total_approved = sum(br.get("approved_rows", 0) for br in all_build_results)
+    total_raw = sum(br.get("raw_details", 0) for br in all_build_results)
+
     print(f"\n{'='*60}")
     print(f"  Month: {year}-{month:02d}")
-    print(f"  Raw details: {build_result['raw_details']}")
-    print(f"  Approved: {build_result['approved_rows']}")
-    print(f"  Grand total: ¥{build_result['grand_total']:,.2f}")
-    print(f"  Summary: {build_result['summary_xlsx']}")
-    print(f"  Detail: {build_result['detail_xlsx']}")
+    for br in all_build_results:
+        print(f"  {br['process_label']}: {br['raw_details']} raw, {br['approved_rows']} approved, ¥{br['grand_total']:,.2f}")
+    print(f"  Total: {total_raw} raw, {total_approved} approved, ¥{grand_total:,.2f}")
+    print(f"  Files: {len(all_build_results) * 2} xlsx reports")
     print(f"  Notification: {'OK' if notify_ok else 'FAILED'}")
     print(f"{'='*60}")
 
